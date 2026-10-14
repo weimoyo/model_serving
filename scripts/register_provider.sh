@@ -237,7 +237,11 @@ EOF
 sudo install -m 0644 "$SERVICE_TMP" /etc/systemd/system/model-serving-agent.service
 rm -f -- "$SERVICE_TMP"
 sudo systemctl daemon-reload
-sudo systemctl enable --now model-serving-agent
+sudo systemctl enable model-serving-agent >/dev/null
+# The bootstrap rotates the Agent key on every run.  An already-active service
+# must therefore be restarted; `enable --now` alone leaves the old key loaded in
+# the running process and makes the authenticated inventory probe return 401.
+sudo systemctl restart model-serving-agent
 
 echo "[4/8] Verifying the Node Agent"
 for _ in {1..30}; do
@@ -248,8 +252,24 @@ curl --silent --fail "http://127.0.0.1:${AGENT_PORT}/healthz" >/dev/null || {
   sudo journalctl -u model-serving-agent --no-pager -n 80 >&2
   exit 1
 }
-curl --silent --fail -H "Authorization: Bearer ${AGENT_KEY}" \
-  "http://127.0.0.1:${AGENT_PORT}/v1/inventory" >/dev/null
+INVENTORY_RESPONSE="$(mktemp)"
+INVENTORY_STATUS="$(curl --silent --show-error --output "$INVENTORY_RESPONSE" --write-out '%{http_code}' \
+  -H "Authorization: Bearer ${AGENT_KEY}" \
+  "http://127.0.0.1:${AGENT_PORT}/v1/inventory")" || {
+  echo "Node Agent inventory request could not be completed." >&2
+  cat "$INVENTORY_RESPONSE" >&2 2>/dev/null || true
+  rm -f -- "$INVENTORY_RESPONSE"
+  sudo journalctl -u model-serving-agent --no-pager -n 80 >&2
+  exit 1
+}
+if [[ "$INVENTORY_STATUS" != "200" ]]; then
+  echo "Node Agent inventory verification failed with HTTP ${INVENTORY_STATUS}:" >&2
+  cat "$INVENTORY_RESPONSE" >&2 2>/dev/null || true
+  rm -f -- "$INVENTORY_RESPONSE"
+  sudo journalctl -u model-serving-agent --no-pager -n 80 >&2
+  exit 1
+fi
+rm -f -- "$INVENTORY_RESPONSE"
 
 echo "[5/8] Preparing the vLLM + SSH runtime image"
 if [[ "$BUILD_RUNTIME" == 1 ]]; then
