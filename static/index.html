@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Standalone Model Serving</title>
+  <style>
+    :root{font-family:Inter,"Microsoft YaHei",sans-serif;color:#e8edf5;background:#0b1020}body{max-width:1100px;margin:0 auto;padding:28px}
+    h1{margin:0 0 6px;font-size:30px}.sub{color:#8fa2c2;margin-bottom:24px}.bar,.grid{display:flex;gap:12px;flex-wrap:wrap}.grid{margin:18px 0}
+    input,textarea,button{font:inherit;border-radius:9px;border:1px solid #30405f;background:#111a2e;color:#edf3ff;padding:10px}input{flex:1;min-width:260px}
+    button{background:#3b6df6;border:0;cursor:pointer;font-weight:650}button:hover{background:#5080ff}.card{background:#121b30;border:1px solid #253553;border-radius:13px;padding:16px;flex:1;min-width:270px}
+    .ok{color:#5ee6a8}.bad{color:#ff8292}.muted{color:#91a1bd}.pill{display:inline-block;padding:3px 8px;border-radius:99px;background:#243557;font-size:12px;margin-left:6px}
+    textarea{width:calc(100% - 22px);height:90px;resize:vertical}.answer{white-space:pre-wrap;min-height:90px;background:#090e1b;border-radius:9px;padding:13px;margin-top:12px}
+    code{color:#aac3ff}a{color:#82a7ff}.row{display:flex;justify-content:space-between;gap:12px;border-bottom:1px solid #21304d;padding:8px 0}.row:last-child{border:0}
+  </style>
+</head>
+<body>
+  <h1>Standalone Model Serving</h1><div class="sub">本机 Gateway · 独立 Node Agent · vLLM / MLX Replica</div>
+  <div class="bar"><input id="key" type="password" value="" placeholder="API Key（本机访问无需填写）"><button onclick="refresh()">刷新状态</button><button onclick="archiveStale()">归档失效记录</button><label><input id="history" type="checkbox" style="min-width:auto" onchange="refresh()"> 显示归档历史</label><a href="/docs" target="_blank">Swagger API</a></div>
+  <div id="summary" class="grid"><div class="card muted">正在加载…</div></div>
+  <div class="card"><h2>Chat Completions</h2><div class="bar"><select id="model" style="flex:1;padding:10px;border-radius:9px;background:#111a2e;color:#fff;border:1px solid #30405f"></select><label><input id="stream" type="checkbox" style="min-width:auto"> 流式</label></div>
+    <textarea id="prompt">请介绍一下这个模型服务平台。</textarea><button onclick="chat()">发送请求</button><div id="answer" class="answer muted">等待请求…</div>
+  </div>
+<script>
+const headers=()=>{const h={'Content-Type':'application/json'},key=document.querySelector('#key').value.trim();if(key)h.Authorization='Bearer '+key;return h};
+async function refresh(){const box=document.querySelector('#summary'),history=document.querySelector('#history').checked;try{const r=await fetch('/api/catalog?include_archived='+history,{headers:headers()});if(!r.ok)throw new Error(await r.text());const c=await r.json();
+  const nodes=c.nodes.map(n=>`<div class="card"><h2>${n.name}<span class="pill ${n.state==='ONLINE'?'ok':'bad'}">${n.state}</span></h2><div class="row"><span>平台</span><b>${n.platform||'-'}</b></div><div class="row"><span>架构</span><b>${n.inventory?.architecture||'-'}</b></div><div class="row"><span>GPU</span><b>${(n.inventory?.accelerators||[]).map(g=>g.model).join(', ')||'无'}</b></div><div class="row"><span>UUID</span><code>${n.inventory?.accelerators?.[0]?.uuid||'-'}</code></div></div>`).join('');
+  const pools=(c.storage_pools||[]).map(p=>`<div class="card"><h2>存储池 ${p.id}<span class="pill ${p.state==='READY'?'ok':'bad'}">${p.state}</span></h2><div class="row"><span>节点 / 用途</span><b>${p.node_id} / ${p.purpose}</b></div><div class="row"><span>Agent / Runtime</span><b>${p.agent_access} / ${p.runtime_access}</b></div><div class="row"><span>用量 / 配额</span><b>${p.used_bytes==null?'-':(p.used_bytes/1073741824).toFixed(1)} / ${p.quota_bytes==null?'∞':(p.quota_bytes/1073741824).toFixed(1)} GiB</b></div><div class="row"><span>磁盘剩余</span><b>${p.free_bytes==null?'-':(p.free_bytes/1073741824).toFixed(1)+' GiB'}</b></div></div>`).join('');
+  const artifacts=(c.artifacts||[]).map(a=>`<div class="card"><h2>Artifact ${a.id}</h2><div class="row"><span>格式 / 大小</span><b>${a.format} / ${(a.size_bytes/1073741824).toFixed(2)} GiB</b></div><div class="row"><span>位置</span><b>${(a.locations||[]).filter(x=>x.state==='READY').length} READY</b></div><div class="row"><span>校验</span><code>${a.checksum.slice(0,28)}…</code></div></div>`).join('');
+  const jobs=[...(c.scan_jobs||[]),...(c.transfer_jobs||[])].filter(j=>history||!['COMPLETED','FAILED','CANCELLED'].includes(j.state)).map(j=>`<div class="card"><h2>任务 ${j.id}<span class="pill ${j.state==='COMPLETED'?'ok':j.state==='FAILED'?'bad':''}">${j.state}</span></h2><div class="row"><span>节点</span><b>${j.node_id}</b></div><div class="row"><span>进度</span><code>${JSON.stringify(j.progress||{})}</code></div></div>`).join('');
+  const replicas=c.models.flatMap(m=>m.deployments.filter(d=>history||d.state!=='DELETED').flatMap(d=>d.replicas.filter(x=>history||!['FAILED','RELEASED'].includes(x.state)).map(x=>({m,d,x}))));
+  const reps=replicas.map(({m,d,x})=>`<div class="card"><h2>${m.display_name}<span class="pill ${x.schedulable?'ok':'bad'}">${x.state}</span></h2><div class="row"><span>Deployment</span><b>${d.id}</b></div><div class="row"><span>Container</span><b>${x.container_state}</b></div><div class="row"><span>Health / Identity</span><b>${x.endpoint_healthy?'✓':'✗'} / ${x.model_runtime_ready?'✓':'✗'}</b></div><div class="row"><span>GPU</span><code>${x.assigned_gpu_uuids.join(', ')}</code></div></div>`).join('');box.innerHTML=nodes+pools+artifacts+jobs+reps||'<div class="card">暂无资源</div>';
+  const sel=document.querySelector('#model');sel.innerHTML=c.models.filter(m=>m.ready_replicas>0).map(m=>`<option value="${m.id}">${m.display_name} (${m.id})</option>`).join('');
+}catch(e){box.innerHTML=`<div class="card bad">加载失败：${e.message}</div>`}}
+async function archiveStale(){const box=document.querySelector('#summary');try{const r=await fetch('/api/maintenance/archive-stale?terminal_replica_hours=0&deleted_deployment_hours=0&completed_job_hours=0',{method:'POST',headers:headers()});if(!r.ok)throw new Error(await r.text());document.querySelector('#history').checked=false;await refresh()}catch(e){box.innerHTML=`<div class="card bad">归档失败：${e.message}</div>`}}
+async function chat(){const out=document.querySelector('#answer');out.className='answer';out.textContent='请求中…';const body={model:document.querySelector('#model').value,messages:[{role:'user',content:document.querySelector('#prompt').value}],stream:document.querySelector('#stream').checked};
+try{const r=await fetch('/v1/chat/completions',{method:'POST',headers:headers(),body:JSON.stringify(body)});if(!r.ok)throw new Error(await r.text());if(!body.stream){const j=await r.json();out.textContent=j.choices?.[0]?.message?.content||JSON.stringify(j,null,2);return}
+out.textContent='';const reader=r.body.getReader(),dec=new TextDecoder();let pending='';while(true){const {done,value}=await reader.read();pending+=dec.decode(value||new Uint8Array(),{stream:!done});const lines=pending.split('\n');pending=lines.pop()||'';for(const line of lines){if(!line.startsWith('data: ')||line==='data: [DONE]')continue;try{const event=JSON.parse(line.slice(6));out.textContent+=event.choices?.[0]?.delta?.content||''}catch{}}if(done)break}}
+catch(e){out.className='answer bad';out.textContent='请求失败：'+e.message}}
+refresh();
+</script></body></html>
